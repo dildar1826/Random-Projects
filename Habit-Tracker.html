@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Orbit - Advanced Habit Tracker</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        gray: {
+                            850: '#1f2937',
+                            900: '#111827',
+                            950: '#030712',
+                        },
+                        primary: {
+                            500: '#6366f1', // Indigo
+                            600: '#4f46e5',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <!-- Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <!-- Firebase -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, doc, addDoc, deleteDoc, onSnapshot, serverTimestamp, query, orderBy, setDoc, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- Firebase Configuration ---
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+
+        let currentUser = null;
+        let habits = [];
+        let logs = [];
+        let charts = {};
+
+        // --- Authentication ---
+        const initAuth = async () => {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Auth error:", error);
+                showToast("Authentication failed. Please refresh.", "error");
+            }
+        };
+
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                currentUser = user;
+                document.getElementById('user-id-display').textContent = `ID: ${user.uid.substring(0, 6)}...`;
+                initDataListeners();
+            }
+        });
+
+        initAuth();
+
+        // --- Data Listeners ---
+        function initDataListeners() {
+            if (!currentUser) return;
+
+            // Listen for Habits
+            const habitsRef = collection(db, 'artifacts', appId, 'users', currentUser.uid, 'habits');
+            onSnapshot(habitsRef, (snapshot) => {
+                habits = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                renderHabitList();
+                updateCharts();
+            }, (error) => {
+                console.error("Error fetching habits:", error);
+                showToast("Error syncing habits", "error");
+            });
+
+            // Listen for Logs (completions)
+            const logsRef = collection(db, 'artifacts', appId, 'users', currentUser.uid, 'logs');
+            onSnapshot(logsRef, (snapshot) => {
+                logs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                renderHabitList(); // Re-render to update checkmarks
+                updateCharts();
+                renderHeatmap();
+                updateStats();
+            }, (error) => {
+                console.error("Error fetching logs:", error);
+            });
+        }
+
+        // --- Core Logic ---
+
+        // Helpers
+        const getTodayDate = () => new Date().toISOString().split('T')[0];
+        
+        const getLogId = (habitId, date) => `${habitId}_${date}`;
+
+        window.toggleHabit = async (habitId) => {
+            if (!currentUser) return;
+            const date = getTodayDate();
+            const logId = getLogId(habitId, date);
+
+            // Check if already completed today
+            const existingLog = logs.find(l => l.habitId === habitId && l.date === date);
+
+            const btn = document.getElementById(`btn-${habitId}`);
+            if(btn) btn.classList.add('scale-95', 'opacity-75'); // Optimistic UI click effect
+
+            try {
+                if (existingLog) {
+                    // Remove log (toggle off)
+                    await deleteDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'logs', existingLog.id));
+                } else {
+                    // Add log (toggle on)
+                    // Use custom ID to prevent duplicates easily: habitId_date
+                    await setDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'logs', logId), {
+                        habitId: habitId,
+                        date: date,
+                        timestamp: serverTimestamp()
+                    });
+                    triggerConfetti(btn);
+                }
+            } catch (e) {
+                console.error("Toggle error", e);
+                showToast("Failed to update habit", "error");
+            } finally {
+                 if(btn) btn.classList.remove('scale-95', 'opacity-75');
+            }
+        };
+
+        window.deleteHabit = async (habitId) => {
+            if (!confirm("Delete this habit and its history?")) return;
+            
+            try {
+                await deleteDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'habits', habitId));
+                // Note: We aren't deleting logs here to keep the 'history' valid in the heatmap, 
+                // but in a production app you might want to archive them.
+                showToast("Habit deleted");
+            } catch (e) {
+                showToast("Error deleting habit", "error");
+            }
+        };
+
+        window.openAddModal = () => {
+            document.getElementById('add-modal').classList.remove('hidden');
+        };
+
+        window.closeAddModal = () => {
+            document.getElementById('add-modal').classList.add('hidden');
+            document.getElementById('habit-form').reset();
+        };
+
+        window.submitHabit = async (e) => {
+            e.preventDefault();
+            const name = document.getElementById('habit-name').value;
+            const category = document.getElementById('habit-category').value;
+            const color = document.getElementById('habit-color').value;
+
+            if (!name) return;
+
+            try {
+                await addDoc(collection(db, 'artifacts', appId, 'users', currentUser.uid, 'habits'), {
+                    name,
+                    category,
+                    color,
+                    createdAt: serverTimestamp()
+                });
+                closeAddModal();
+                showToast("Habit created!");
+            } catch (e) {
+                console.error(e);
+                showToast("Error creating habit", "error");
+            }
+        };
+
+        // --- Rendering ---
+
+        function renderHabitList() {
+            const list = document.getElementById('habit-list');
+            list.innerHTML = '';
+            const today = getTodayDate();
+
+            if (habits.length === 0) {
+                list.innerHTML = `
+                    <div class="text-center p-8 text-gray-500">
+                        <i class="fas fa-seedling text-4xl mb-3"></i>
+                        <p>No habits yet. Start your journey!</p>
+                    </div>
+                `;
+                return;
+            }
+
+            habits.forEach(habit => {
+                const isCompleted = logs.some(l => l.habitId === habit.id && l.date === today);
+                const streak = calculateStreak(habit.id);
+
+                const card = document.createElement('div');
+                card.className = `bg-gray-800 p-4 rounded-xl shadow-lg flex items-center justify-between transition-all hover:bg-gray-750 border-l-4 ${isCompleted ? 'border-green-500' : 'border-' + habit.color}`;
+                card.style.borderColor = isCompleted ? '#10B981' : habit.color;
+
+                card.innerHTML = `
+                    <div class="flex-1">
+                        <div class="flex items-center gap-2">
+                            <h3 class="font-bold text-white text-lg ${isCompleted ? 'line-through text-gray-400' : ''}">${habit.name}</h3>
+                            <span class="text-xs px-2 py-0.5 rounded bg-gray-700 text-gray-300">${habit.category}</span>
+                        </div>
+                        <div class="text-sm text-gray-400 mt-1">
+                            <i class="fas fa-fire text-orange-500"></i> ${streak} day streak
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <button onclick="toggleHabit('${habit.id}')" id="btn-${habit.id}"
+                            class="h-10 w-10 rounded-full flex items-center justify-center transition-all duration-200 ${isCompleted ? 'bg-green-500 text-white' : 'bg-gray-700 text-gray-400 hover:bg-gray-600'}">
+                            <i class="fas fa-check"></i>
+                        </button>
+                        <button onclick="deleteHabit('${habit.id}')" class="text-gray-600 hover:text-red-400 transition-colors p-2">
+                            <i class="fas fa-trash-alt"></i>
+                        </button>
+                    </div>
+                `;
+                list.appendChild(card);
+            });
+        }
+
+        function calculateStreak(habitId) {
+            // Simple current streak calculation
+            let streak = 0;
+            const habitLogs = logs.filter(l => l.habitId === habitId).map(l => l.date).sort().reverse();
+            
+            if (habitLogs.length === 0) return 0;
+
+            const today = getTodayDate();
+            const yesterday = new Date();
+            yesterday.setDate(yesterday.getDate() - 1);
+            const yesterdayStr = yesterday.toISOString().split('T')[0];
+
+            // If not done today, check if done yesterday to maintain streak
+            if (!habitLogs.includes(today) && !habitLogs.includes(yesterdayStr)) {
+                return 0;
+            }
+
+            let checkDate = new Date();
+            // Start checking from today if done, else yesterday
+            if (!habitLogs.includes(today)) {
+                checkDate.setDate(checkDate.getDate() - 1);
+            }
+
+            while (true) {
+                const dateStr = checkDate.toISOString().split('T')[0];
+                if (habitLogs.includes(dateStr)) {
+                    streak++;
+                    checkDate.setDate(checkDate.getDate() - 1);
+                } else {
+                    break;
+                }
+            }
+            return streak;
+        }
+
+        function updateStats() {
+            const today = getTodayDate();
+            
+            // Completion Rate
+            const completedToday = logs.filter(l => l.date === today).length;
+            const totalHabits = habits.length;
+            const percent = totalHabits === 0 ? 0 : Math.round((completedToday / totalHabits) * 100);
+
+            document.getElementById('completion-rate').textContent = `${percent}%`;
+            document.getElementById('habits-done').textContent = `${completedToday}/${totalHabits}`;
+            
+            // Total Logs
+            document.getElementById('total-logs').textContent = logs.length;
+        }
+
+        // --- Visuals & Charts ---
+
+        function renderHeatmap() {
+            const container = document.getElementById('heatmap-grid');
+            container.innerHTML = '';
+            
+            // GitHub style: 52 weeks (cols) x 7 days (rows)
+            // But standard grid is easier as Day blocks
+            // Let's make a grid of the last 365 days
+            
+            const daysToShow = 364; // Approx a year
+            const today = new Date();
+            
+            // Create stats map: date -> count
+            const dateCounts = {};
+            logs.forEach(l => {
+                dateCounts[l.date] = (dateCounts[l.date] || 0) + 1;
+            });
+
+            // Determine max for opacity calculation
+            let maxCompletions = 1; // avoid div by zero
+            // Average expected max is habit count
+            if (habits.length > 0) maxCompletions = habits.length;
+
+            for (let i = daysToShow; i >= 0; i--) {
+                const d = new Date();
+                d.setDate(today.getDate() - i);
+                const dateStr = d.toISOString().split('T')[0];
+                
+                const count = dateCounts[dateStr] || 0;
+                const intensity = Math.min(1, count / maxCompletions); // 0 to 1
+                
+                const cell = document.createElement('div');
+                cell.className = 'rounded-sm w-full h-full aspect-square';
+                cell.title = `${dateStr}: ${count} completed`;
+                
+                // Colors based on intensity (Green scale)
+                if (count === 0) {
+                    cell.style.backgroundColor = '#374151'; // gray-700
+                } else if (intensity < 0.25) {
+                    cell.style.backgroundColor = '#064e3b'; // 900
+                } else if (intensity < 0.5) {
+                    cell.style.backgroundColor = '#065f46'; // 800
+                } else if (intensity < 0.75) {
+                    cell.style.backgroundColor = '#10b981'; // 500
+                } else {
+                    cell.style.backgroundColor = '#34d399'; // 400
+                }
+
+                container.appendChild(cell);
+            }
+        }
+
+        function updateCharts() {
+            // 1. Weekly Progress (Bar Chart)
+            const ctx1 = document.getElementById('weeklyChart').getContext('2d');
+            
+            // Get last 7 days
+            const labels = [];
+            const data = [];
+            for(let i=6; i>=0; i--) {
+                const d = new Date();
+                d.setDate(d.getDate() - i);
+                const dateStr = d.toISOString().split('T')[0];
+                const dayName = d.toLocaleDateString('en-US', { weekday: 'short' });
+                labels.push(dayName);
+                
+                const count = logs.filter(l => l.date === dateStr).length;
+                data.push(count);
+            }
+
+            if (charts.weekly) charts.weekly.destroy();
+            charts.weekly = new Chart(ctx1, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Habits Completed',
+                        data: data,
+                        backgroundColor: '#6366f1',
+                        borderRadius: 4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        y: { beginAtZero: true, ticks: { color: '#9ca3af' }, grid: { color: '#374151' } },
+                        x: { ticks: { color: '#9ca3af' }, grid: { display: false } }
+                    }
+                }
+            });
+
+            // 2. Category Distribution (Doughnut)
+            const ctx2 = document.getElementById('categoryChart').getContext('2d');
+            const categories = {};
+            
+            habits.forEach(h => {
+                // Count completions per category
+                const count = logs.filter(l => l.habitId === h.id).length;
+                categories[h.category] = (categories[h.category] || 0) + count;
+            });
+
+            if (charts.category) charts.category.destroy();
+            charts.category = new Chart(ctx2, {
+                type: 'doughnut',
+                data: {
+                    labels: Object.keys(categories),
+                    datasets: [{
+                        data: Object.values(categories),
+                        backgroundColor: [
+                            '#f472b6', '#60a5fa', '#34d399', '#fbbf24', '#a78bfa'
+                        ],
+                        borderWidth: 0
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { 
+                        legend: { position: 'right', labels: { color: '#9ca3af' } } 
+                    }
+                }
+            });
+        }
+
+        // --- Utilities ---
+        function showToast(message, type = "success") {
+            const toast = document.createElement('div');
+            toast.className = `fixed bottom-4 left-1/2 transform -translate-x-1/2 px-6 py-3 rounded-full shadow-xl z-50 text-white font-medium animate-fade-in-up ${type === 'error' ? 'bg-red-500' : 'bg-gray-700 border border-gray-600'}`;
+            toast.innerHTML = message;
+            document.body.appendChild(toast);
+            setTimeout(() => toast.remove(), 3000);
+        }
+
+        // Confetti Effect
+        function triggerConfetti(element) {
+            if(!element) return;
+            const rect = element.getBoundingClientRect();
+            const x = (rect.left + rect.right) / 2 / window.innerWidth;
+            const y = (rect.top + rect.bottom) / 2 / window.innerHeight;
+            
+            // Basic particle explosion simulation using DOM for simplicity in single file without extra libs
+            for(let i=0; i<20; i++) {
+                const p = document.createElement('div');
+                p.className = 'fixed w-2 h-2 rounded-full pointer-events-none z-50';
+                p.style.left = rect.left + 'px';
+                p.style.top = rect.top + 'px';
+                p.style.backgroundColor = ['#FFD700', '#FF6347', '#00FA9A', '#1E90FF'][Math.floor(Math.random()*4)];
+                p.style.transition = 'all 0.8s ease-out';
+                document.body.appendChild(p);
+
+                // Animate
+                setTimeout(() => {
+                    const angle = Math.random() * Math.PI * 2;
+                    const velocity = 50 + Math.random() * 100;
+                    p.style.transform = `translate(${Math.cos(angle)*velocity}px, ${Math.sin(angle)*velocity}px) scale(0)`;
+                    p.style.opacity = 0;
+                }, 10);
+
+                setTimeout(() => p.remove(), 800);
+            }
+        }
+
+        // Expose functions to global scope for HTML onClick
+        window.initApp = () => {
+            // Initial setups if needed
+        };
+    </script>
+
+    <style>
+        body {
+            background-color: #111827; /* gray-900 */
+            color: #f3f4f6;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #1f2937; }
+        ::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #6b7280; }
+
+        /* Heatmap Grid */
+        #heatmap-grid {
+            display: grid;
+            grid-template-columns: repeat(53, 1fr); /* Weeks approx */
+            grid-template-rows: repeat(7, 1fr);
+            gap: 3px;
+            grid-auto-flow: column; /* Fill columns (weeks) first */
+        }
+
+        @media (max-width: 768px) {
+            #heatmap-grid {
+                grid-template-columns: repeat(26, 1fr); /* Less weeks on mobile */
+                overflow-x: hidden;
+            }
+        }
+
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translate(-50%, 20px); }
+            to { opacity: 1; transform: translate(-50%, 0); }
+        }
+        .animate-fade-in-up { animation: fadeInUp 0.3s ease-out forwards; }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col pb-20 md:pb-0">
+
+    <!-- Navbar -->
+    <nav class="bg-gray-800 border-b border-gray-700 sticky top-0 z-40">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex items-center justify-between h-16">
+                <div class="flex items-center gap-3">
+                    <div class="bg-primary-600 text-white p-2 rounded-lg">
+                        <i class="fas fa-orbit"></i>
+                    </div>
+                    <span class="text-xl font-bold tracking-wide">Orbit</span>
+                </div>
+                <div class="text-xs text-gray-500 bg-gray-900 px-2 py-1 rounded border border-gray-700" id="user-id-display">
+                    Loading...
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 flex-1 w-full">
+        
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            
+            <!-- Left Column: Dashboard & Habits -->
+            <div class="lg:col-span-2 space-y-8">
+                
+                <!-- Stats Cards -->
+                <div class="grid grid-cols-3 gap-4">
+                    <div class="bg-gray-800 p-4 rounded-xl border border-gray-700">
+                        <p class="text-gray-400 text-xs uppercase font-semibold tracking-wider">Rate</p>
+                        <p class="text-2xl font-bold text-white mt-1" id="completion-rate">0%</p>
+                    </div>
+                    <div class="bg-gray-800 p-4 rounded-xl border border-gray-700">
+                        <p class="text-gray-400 text-xs uppercase font-semibold tracking-wider">Done Today</p>
+                        <p class="text-2xl font-bold text-primary-500 mt-1" id="habits-done">0/0</p>
+                    </div>
+                    <div class="bg-gray-800 p-4 rounded-xl border border-gray-700">
+                        <p class="text-gray-400 text-xs uppercase font-semibold tracking-wider">Lifetime</p>
+                        <p class="text-2xl font-bold text-green-500 mt-1" id="total-logs">0</p>
+                    </div>
+                </div>
+
+                <!-- Heatmap Section -->
+                <div class="bg-gray-800 p-4 rounded-xl border border-gray-700 overflow-hidden">
+                    <h2 class="text-sm font-semibold text-gray-300 mb-4 flex items-center gap-2">
+                        <i class="fas fa-th"></i> Consistency Graph (Last Year)
+                    </h2>
+                    <div class="w-full overflow-x-auto pb-2">
+                        <!-- Fixed height container for the grid -->
+                        <div id="heatmap-grid" class="h-32 w-full min-w-[600px]"></div>
+                    </div>
+                </div>
+
+                <!-- Habit List Header -->
+                <div class="flex items-center justify-between">
+                    <h2 class="text-xl font-bold text-white">Your Habits</h2>
+                    <button onclick="openAddModal()" class="bg-primary-600 hover:bg-primary-500 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-colors shadow-lg shadow-primary-600/20">
+                        <i class="fas fa-plus"></i> <span class="hidden sm:inline">New Habit</span>
+                    </button>
+                </div>
+
+                <!-- Habits Container -->
+                <div id="habit-list" class="space-y-3">
+                    <!-- Habits injected here -->
+                    <div class="animate-pulse space-y-3">
+                        <div class="h-20 bg-gray-800 rounded-xl"></div>
+                        <div class="h-20 bg-gray-800 rounded-xl"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Column: Analytics -->
+            <div class="space-y-8">
+                
+                <!-- Weekly Chart -->
+                <div class="bg-gray-800 p-6 rounded-xl border border-gray-700">
+                    <h3 class="text-sm font-semibold text-gray-300 mb-4">Weekly Activity</h3>
+                    <div class="h-48 relative">
+                        <canvas id="weeklyChart"></canvas>
+                    </div>
+                </div>
+
+                <!-- Category Chart -->
+                <div class="bg-gray-800 p-6 rounded-xl border border-gray-700">
+                    <h3 class="text-sm font-semibold text-gray-300 mb-4">Focus Areas</h3>
+                    <div class="h-48 relative">
+                        <canvas id="categoryChart"></canvas>
+                    </div>
+                </div>
+
+                <!-- Motivation Quote -->
+                <div class="bg-gradient-to-br from-gray-800 to-gray-900 p-6 rounded-xl border border-gray-700 relative overflow-hidden">
+                    <div class="absolute top-0 right-0 -mt-4 -mr-4 w-24 h-24 bg-primary-600 opacity-10 rounded-full blur-2xl"></div>
+                    <p class="text-gray-300 italic text-sm relative z-10">"We are what we repeatedly do. Excellence, then, is not an act, but a habit."</p>
+                    <p class="text-gray-500 text-xs mt-2 text-right">— Aristotle</p>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Add Habit Modal -->
+    <div id="add-modal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
+        <div class="bg-gray-800 rounded-2xl w-full max-w-md border border-gray-700 shadow-2xl transform transition-all scale-100">
+            <div class="p-6 border-b border-gray-700 flex justify-between items-center">
+                <h3 class="text-lg font-bold text-white">Create New Habit</h3>
+                <button onclick="closeAddModal()" class="text-gray-400 hover:text-white">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <form id="habit-form" onsubmit="submitHabit(event)" class="p-6 space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-400 mb-1">Habit Name</label>
+                    <input type="text" id="habit-name" placeholder="e.g. Read 10 pages" required
+                        class="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white focus:ring-2 focus:ring-primary-600 focus:border-transparent outline-none transition-all">
+                </div>
+                
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-400 mb-1">Category</label>
+                        <select id="habit-category" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white outline-none">
+                            <option value="Health">Health</option>
+                            <option value="Productivity">Productivity</option>
+                            <option value="Learning">Learning</option>
+                            <option value="Mindfulness">Mindfulness</option>
+                            <option value="Fitness">Fitness</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-400 mb-1">Color</label>
+                        <select id="habit-color" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white outline-none">
+                            <option value="#6366f1">Indigo</option>
+                            <option value="#ef4444">Red</option>
+                            <option value="#10b981">Green</option>
+                            <option value="#f59e0b">Amber</option>
+                            <option value="#ec4899">Pink</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="pt-4">
+                    <button type="submit" class="w-full bg-primary-600 hover:bg-primary-500 text-white font-bold py-3 rounded-lg transition-colors shadow-lg">
+                        Start Tracking
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+</body>
+</html>
+
