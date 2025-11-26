@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Beautiful habit tracker with interactive graphs and analytics">
+    <title>Habit Tracker - Build Better Habits</title>
+    <link rel="stylesheet" href="index.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-content">
+                <h1 class="logo">
+                    <span class="logo-icon">✨</span>
+                    Habit Tracker
+                </h1>
+                <div class="header-stats">
+                    <div class="stat-card">
+                        <span class="stat-label">Total Habits</span>
+                        <span class="stat-value" id="total-habits">0</span>
+                    </div>
+                    <div class="stat-card">
+                        <span class="stat-label">Streak</span>
+                        <span class="stat-value" id="current-streak">0</span>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Add Habit Section -->
+            <section class="add-habit-section">
+                <div class="add-habit-card">
+                    <h2 class="section-title">Create New Habit</h2>
+                    <form id="add-habit-form" class="habit-form">
+                        <div class="form-group">
+                            <input type="text" id="habit-name" class="form-input" placeholder="Enter habit name..."
+                                required>
+                        </div>
+                        <div class="form-group">
+                            <select id="habit-category" class="form-select">
+                                <option value="health">🏃 Health & Fitness</option>
+                                <option value="productivity">💼 Productivity</option>
+                                <option value="mindfulness">🧘 Mindfulness</option>
+                                <option value="learning">📚 Learning</option>
+                                <option value="creative">🎨 Creative</option>
+                                <option value="social">👥 Social</option>
+                            </select>
+                        </div>
+                        <button type="submit" class="btn btn-primary">
+                            <span class="btn-icon">+</span>
+                            Add Habit
+                        </button>
+                    </form>
+                </div>
+            </section>
+
+            <!-- Habits Grid -->
+            <section class="habits-section">
+                <h2 class="section-title">Your Habits</h2>
+                <div id="habits-grid" class="habits-grid">
+                    <!-- Habits will be dynamically inserted here -->
+                </div>
+                <div id="empty-state" class="empty-state">
+                    <div class="empty-state-icon">🎯</div>
+                    <h3>No habits yet</h3>
+                    <p>Start building better habits by creating your first one above!</p>
+                </div>
+            </section>
+
+            <!-- Analytics Section -->
+            <section class="analytics-section">
+                <h2 class="section-title">Analytics & Insights</h2>
+                <div class="analytics-grid">
+                    <div class="chart-card">
+                        <h3 class="chart-title">Completion Rate (Last 7 Days)</h3>
+                        <canvas id="completion-chart"></canvas>
+                    </div>
+                    <div class="chart-card">
+                        <h3 class="chart-title">Habits by Category</h3>
+                        <canvas id="category-chart"></canvas>
+                    </div>
+                    <div class="chart-card chart-card-wide">
+                        <h3 class="chart-title">30-Day Streak Heatmap</h3>
+                        <canvas id="streak-chart"></canvas>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+
+</html>
